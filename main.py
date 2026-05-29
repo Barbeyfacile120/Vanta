@@ -4,55 +4,62 @@ import uuid
 import subprocess
 import ctypes
 from ctypes import wintypes
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QSettings, QPoint, QPropertyAnimation, QEasingCurve, QEvent, QParallelAnimationGroup, QRect
+from typing import List, Optional
+
+from PyQt6.QtCore import (
+    QThread, pyqtSignal, Qt, QSettings, QPoint, QPropertyAnimation, 
+    QEasingCurve, QEvent, QParallelAnimationGroup, QRect
+)
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QComboBox, QPushButton, QMessageBox, QGraphicsDropShadowEffect, QFrame, QLabel
+    QLineEdit, QComboBox, QPushButton, QMessageBox, QGraphicsDropShadowEffect, 
+    QFrame, QLabel
 )
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QBrush, QPolygon, QIcon
 import minecraft_launcher_lib
 
+
 class VersionFetchWorker(QThread):
-    """Fetches Minecraft release versions from Mojang API in a background thread."""
+    """Asynchronously fetches official Minecraft release versions from the Mojang API."""
 
     versions_fetched = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
 
-    def run(self):
+    def run(self) -> None:
         try:
             version_list = minecraft_launcher_lib.utils.get_version_list()
             releases = [v["id"] for v in version_list if v["type"] == "release"]
             if not releases:
-                raise ValueError("No release versions found.")
+                raise ValueError("No release versions returned from API.")
             self.versions_fetched.emit(releases)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
 
 class LaunchWorker(QThread):
-    """Handles Minecraft installation and game process in a background thread."""
+    """Handles runtime file verification, asset downloads, and execution of the client."""
 
     progress_updated = pyqtSignal(str, int)
     launch_success = pyqtSignal()
     game_exited = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, username, version, minecraft_dir):
+    def __init__(self, username: str, version: str, minecraft_dir: str):
         super().__init__()
         self.username = username
         self.version = version
         self.minecraft_dir = minecraft_dir
         self._max_val = 0
 
-    def run(self):
+    def run(self) -> None:
         try:
-            def _set_status(text):
+            def _set_status(text: str) -> None:
                 self.progress_updated.emit(text, -1)
 
-            def _set_max(val):
+            def _set_max(val: int) -> None:
                 self._max_val = val
 
-            def _set_progress(val):
+            def _set_progress(val: int) -> None:
                 if self._max_val > 0:
                     percent = int((val / self._max_val) * 100)
                     self.progress_updated.emit("Installing...", percent)
@@ -63,9 +70,8 @@ class LaunchWorker(QThread):
                 "setMax": _set_max,
             }
 
-            installed_versions = [
-                v["id"]
-                for v in minecraft_launcher_lib.utils.get_installed_versions(
+            installed = [
+                v["id"] for v in minecraft_launcher_lib.utils.get_installed_versions(
                     self.minecraft_dir
                 )
             ]
@@ -75,14 +81,14 @@ class LaunchWorker(QThread):
                 minecraft_launcher_lib.install.install_minecraft_version(
                     self.version, self.minecraft_dir, callback=callbacks
                 )
-            except Exception as net_error:
-                if self.version in installed_versions:
+            except Exception as net_err:
+                if self.version in installed:
                     self.progress_updated.emit("Offline: Launching cached...", 100)
                 else:
                     raise RuntimeError(
-                        f"Failed to download required files for {self.version}.\n"
-                        "Please check your internet connection."
-                    ) from net_error
+                        f"Failed to fetch assets for {self.version}.\n"
+                        "Please verify your internet connection."
+                    ) from net_err
 
             self.progress_updated.emit("Preparing launch...", 100)
             command = minecraft_launcher_lib.command.get_minecraft_command(
@@ -110,16 +116,16 @@ class LaunchWorker(QThread):
 
         except FileNotFoundError:
             self.error_occurred.emit(
-                "Java was not found.\n\n"
-                "Please make sure Java (OpenJDK 17 or 21 recommended) "
-                "is installed and added to your system's PATH."
+                "Java environment not found.\n\n"
+                "Please ensure Java (OpenJDK 17 or 21 recommended) "
+                "is installed and present in your system's PATH."
             )
         except Exception as e:
             self.error_occurred.emit(str(e))
 
 
-def _generate_arrow_image():
-    """Generates a dropdown arrow icon at ~/.mclaunch/arrow.png if missing."""
+def _generate_arrow_image() -> str:
+    """Generates the combobox dropdown vector resource if missing."""
     temp_dir = os.path.join(os.path.expanduser("~"), ".mclaunch")
     os.makedirs(temp_dir, exist_ok=True)
     arrow_path = os.path.join(temp_dir, "arrow.png").replace("\\", "/")
@@ -135,69 +141,59 @@ def _generate_arrow_image():
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(QBrush(QColor("#FFFFFF")))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawPolygon(
-            QPolygon([QPoint(1, 2), QPoint(11, 2), QPoint(6, 7)])
-        )
+        painter.drawPolygon(QPolygon([QPoint(1, 2), QPoint(11, 2), QPoint(6, 7)]))
         painter.end()
 
         image.save(arrow_path)
     except Exception as e:
-        print(f"Failed to generate arrow icon: {e}")
+        sys.stderr.write(f"Resource generation failure: {e}\n")
 
     return arrow_path
 
 
 class MinecraftLauncher(QMainWindow):
-    """A lightweight, frameless Minecraft launcher with animated window transitions."""
-
     _FADE_DURATION = 250
     _EXPAND_DURATION = 350
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.minecraft_dir = minecraft_launcher_lib.utils.get_minecraft_directory()
         self.settings = QSettings("Vanta", "Preferences")
         self._drag_position = QPoint()
         self._is_closing = False
+        
         self.setWindowOpacity(0.0)
         self._init_ui()
         self._load_settings()
         self._fetch_versions()
 
-    # ------------------------------------------------------------------
-    # Window dragging
-    # ------------------------------------------------------------------
-
-    def mousePressEvent(self, event):
+    def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_position = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
             event.accept()
 
-    def mouseMoveEvent(self, event):
+    def mouseMoveEvent(self, event) -> None:
         if event.buttons() == Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_position)
             event.accept()
 
-    # ------------------------------------------------------------------
-    # Animation helpers
-    # ------------------------------------------------------------------
-
-    def _stop_animations(self):
+    def _stop_animations(self) -> None:
         group = getattr(self, "_anim_group", None)
         if group is not None and group.state() == QParallelAnimationGroup.State.Running:
             group.stop()
 
     @staticmethod
-    def _shrink_geometry(rect, factor=0.92):
-        w, h = int(rect.width() * factor), int(rect.height() * factor)
+    def _shrink_geometry(rect: QRect, factor: float = 0.92) -> QRect:
+        w = int(rect.width() * factor)
+        h = int(rect.height() * factor)
         x = rect.x() + (rect.width() - w) // 2
         y = rect.y() + (rect.height() - h) // 2
         return QRect(x, y, w, h)
 
     @staticmethod
-    def _get_taskbar_geometry():
+    def _get_taskbar_geometry() -> Optional[QRect]:
         try:
             hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
             if not hwnd:
@@ -208,7 +204,7 @@ class MinecraftLauncher(QMainWindow):
         except Exception:
             return None
 
-    def _fade_out_with_shrink(self, finish_callback, *, target_geo=None, slide_down=False):
+    def _fade_out_with_shrink(self, finish_callback, *, target_geo: Optional[QRect] = None, slide_down: bool = False) -> None:
         self._stop_animations()
 
         opacity = QPropertyAnimation(self, b"windowOpacity")
@@ -237,7 +233,7 @@ class MinecraftLauncher(QMainWindow):
         self._anim_group.finished.connect(finish_callback)
         self._anim_group.start()
 
-    def _fade_in(self):
+    def _fade_in(self) -> None:
         self._stop_animations()
         current = self.geometry()
 
@@ -272,7 +268,7 @@ class MinecraftLauncher(QMainWindow):
         self._anim_group.addAnimation(geo)
         self._anim_group.start()
 
-    def _fade_in_from_taskbar(self):
+    def _fade_in_from_taskbar(self) -> None:
         self._stop_animations()
         target = getattr(self, "_restore_geometry", self.geometry())
 
@@ -304,7 +300,7 @@ class MinecraftLauncher(QMainWindow):
         self._anim_group.addAnimation(geo)
         self._anim_group.start()
 
-    def _fade_out_and_minimize(self):
+    def _fade_out_and_minimize(self) -> None:
         self._restore_geometry = self.geometry()
         taskbar = self._get_taskbar_geometry()
 
@@ -316,17 +312,13 @@ class MinecraftLauncher(QMainWindow):
         else:
             self._fade_out_with_shrink(self._minimize_now, slide_down=True)
 
-    def _minimize_now(self):
+    def _minimize_now(self) -> None:
         if hasattr(self, "_restore_geometry"):
             self.setGeometry(self._restore_geometry)
         self.setWindowOpacity(0.0)
         self.showMinimized()
 
-    # ------------------------------------------------------------------
-    # Qt event overrides
-    # ------------------------------------------------------------------
-
-    def closeEvent(self, event):
+    def closeEvent(self, event) -> None:
         if not self._is_closing:
             self._is_closing = True
             event.ignore()
@@ -334,7 +326,7 @@ class MinecraftLauncher(QMainWindow):
         else:
             event.accept()
 
-    def changeEvent(self, event):
+    def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             if not self.isMinimized() and self.windowOpacity() < 1.0:
                 if hasattr(self, "_restore_geometry"):
@@ -343,17 +335,12 @@ class MinecraftLauncher(QMainWindow):
                     self._fade_in()
         super().changeEvent(event)
 
-    def showEvent(self, event):
+    def showEvent(self, event) -> None:
         super().showEvent(event)
         if self.windowOpacity() == 0.0:
             self._fade_in()
 
-
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
-
-    def _init_ui(self):
+    def _init_ui(self) -> None:
         self.setWindowTitle("Vanta Launcher")
 
         if getattr(sys, "frozen", False):
@@ -362,12 +349,8 @@ class MinecraftLauncher(QMainWindow):
             icon_path = os.path.join(os.path.dirname(__file__), "icons", "icon.ico")
         self.setWindowIcon(QIcon(icon_path))
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint
-        )
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
-        # Window is slightly larger than the card to avoid clipping the drop shadow.
         self.setFixedSize(370, 290)
 
         arrow_path = _generate_arrow_image()
@@ -382,7 +365,6 @@ class MinecraftLauncher(QMainWindow):
         outer_h = QHBoxLayout()
         outer_h.addStretch(1)
 
-        # ------ card ------
         card = QFrame(objectName="cardFrame")
         card.setFixedSize(320, 240)
 
@@ -397,7 +379,6 @@ class MinecraftLauncher(QMainWindow):
         card_layout.setContentsMargins(24, 16, 24, 24)
         card_layout.setSpacing(14)
 
-        # ------ title bar ------
         title = QHBoxLayout()
         title.setContentsMargins(0, 0, 0, 0)
         title.setSpacing(8)
@@ -422,7 +403,6 @@ class MinecraftLauncher(QMainWindow):
         title.addWidget(self._close_btn)
         card_layout.addLayout(title)
 
-        # ------ form ------
         self.nick_input = QLineEdit()
         self.nick_input.setPlaceholderText("Username")
 
@@ -443,7 +423,7 @@ class MinecraftLauncher(QMainWindow):
         outer_v.addStretch(1)
 
     @staticmethod
-    def _stylesheet(arrow_path):
+    def _stylesheet(arrow_path: str) -> str:
         return f"""
             QMainWindow {{
                 background: transparent;
@@ -573,28 +553,20 @@ class MinecraftLauncher(QMainWindow):
             }}
         """
 
-    # ------------------------------------------------------------------
-    # Settings persistence
-    # ------------------------------------------------------------------
-
-    def _load_settings(self):
+    def _load_settings(self) -> None:
         self.nick_input.setText(self.settings.value("username", ""))
 
-    def _save_settings(self):
+    def _save_settings(self) -> None:
         self.settings.setValue("username", self.nick_input.text().strip())
         self.settings.setValue("version", self.version_combo.currentText())
 
-    # ------------------------------------------------------------------
-    # Version list
-    # ------------------------------------------------------------------
-
-    def _fetch_versions(self):
+    def _fetch_versions(self) -> None:
         self._fetch_worker = VersionFetchWorker()
         self._fetch_worker.versions_fetched.connect(self._on_versions_fetched)
         self._fetch_worker.error_occurred.connect(self._on_versions_fetch_failed)
         self._fetch_worker.start()
 
-    def _on_versions_fetched(self, versions):
+    def _on_versions_fetched(self, versions: List[str]) -> None:
         self.version_combo.clear()
         self.version_combo.addItems(versions)
         self.version_combo.setEnabled(True)
@@ -603,14 +575,12 @@ class MinecraftLauncher(QMainWindow):
         if saved_version in versions:
             self.version_combo.setCurrentText(saved_version)
 
-    def _on_versions_fetch_failed(self, _error_message):
+    def _on_versions_fetch_failed(self, _error_message: str) -> None:
         self.version_combo.clear()
-
         fallback = ["1.21.4", "1.21.1", "1.20.4", "1.19.4", "1.16.5", "1.8.9"]
         try:
             installed = [
-                v["id"]
-                for v in minecraft_launcher_lib.utils.get_installed_versions(
+                v["id"] for v in minecraft_launcher_lib.utils.get_installed_versions(
                     self.minecraft_dir
                 )
             ]
@@ -621,23 +591,17 @@ class MinecraftLauncher(QMainWindow):
 
         self.version_combo.setEnabled(True)
 
-    # ------------------------------------------------------------------
-    # Launch flow
-    # ------------------------------------------------------------------
-
-    def _set_ui_enabled(self, enabled):
+    def _set_ui_enabled(self, enabled: bool) -> None:
         self.nick_input.setEnabled(enabled)
         self.version_combo.setEnabled(enabled)
         self.play_button.setEnabled(enabled)
 
-    def _launch_game(self):
+    def _launch_game(self) -> None:
         username = self.nick_input.text().strip()
         version = self.version_combo.currentText()
 
         if not username:
-            QMessageBox.warning(
-                self, "Invalid Username", "Please enter a username."
-            )
+            QMessageBox.warning(self, "Invalid Username", "Please enter a username.")
             return
 
         self._save_settings()
@@ -650,23 +614,23 @@ class MinecraftLauncher(QMainWindow):
         self._launch_worker.error_occurred.connect(self._on_launch_error)
         self._launch_worker.start()
 
-    def _on_launch_progress(self, status, percent):
+    def _on_launch_progress(self, status: str, percent: int) -> None:
         if percent >= 0:
             self.play_button.setText(f"Installing: {percent}%")
         else:
             label = status[:20] + "..." if len(status) > 20 else status
             self.play_button.setText(label)
 
-    def _on_launch_success(self):
+    def _on_launch_success(self) -> None:
         self._fade_out_with_shrink(self.hide)
 
-    def _on_game_exited(self):
+    def _on_game_exited(self) -> None:
         self.setWindowOpacity(0.0)
         self.show()
         self._set_ui_enabled(True)
         self.play_button.setText("Play")
 
-    def _on_launch_error(self, error_message):
+    def _on_launch_error(self, error_message: str) -> None:
         self._set_ui_enabled(True)
         self.play_button.setText("Play")
         QMessageBox.critical(
@@ -677,6 +641,13 @@ class MinecraftLauncher(QMainWindow):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            # Set process AppUserModelID to resolve taskbar icon clustering behavior
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vanta.launcher.minecraft.1.0")
+        except Exception as e:
+            sys.stderr.write(f"Failed to configure taskbar AppUserModelID: {e}\n")
+
     app = QApplication(sys.argv)
     launcher = MinecraftLauncher()
     launcher.show()
