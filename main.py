@@ -4,26 +4,67 @@ import uuid
 import subprocess
 import ctypes
 import shutil
+import requests
+import threading
 from ctypes import wintypes
 from typing import List, Optional
 
+try:
+    from pypresence import Presence
+except ImportError:
+    Presence = None
+
 from PyQt6.QtCore import (
     QThread, pyqtSignal, Qt, QSettings, QPoint, QPropertyAnimation, 
-    QEasingCurve, QEvent, QParallelAnimationGroup, QRect
+    QEasingCurve, QEvent, QParallelAnimationGroup, QRect, QTimer
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QComboBox, QPushButton, QMessageBox, QGraphicsDropShadowEffect, 
-    QFrame, QLabel
+    QFrame, QLabel, QStackedWidget, QSlider, QCheckBox, QListWidget, QListWidgetItem
 )
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QBrush, QPolygon, QIcon
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QBrush, QPolygon, QIcon, QPixmap
+
 import minecraft_launcher_lib
 import minecraft_launcher_lib.runtime
+import minecraft_launcher_lib.fabric
+
+
+def silence_asyncio_windows_bugs() -> None:
+    """
+    Suppresses noisy traceback warnings on Windows during asyncio event loop teardown.
+    This patches a known Python standard library issue where GC attempts to clean up 
+    closed pipe transports and raises ignored ValueError/RuntimeError exceptions.
+    """
+    if sys.platform == "win32":
+        try:
+            import asyncio
+            from asyncio import proactor_events, base_subprocess
+            
+            # Patch _ProactorBasePipeTransport.__del__
+            if hasattr(proactor_events, "_ProactorBasePipeTransport"):
+                org_pipe_del = proactor_events._ProactorBasePipeTransport.__del__
+                def patched_pipe_del(self):
+                    try:
+                        org_pipe_del(self)
+                    except (ValueError, OSError, RuntimeError):
+                        pass
+                proactor_events._ProactorBasePipeTransport.__del__ = patched_pipe_del
+
+            # Patch BaseSubprocessTransport.__del__
+            if hasattr(base_subprocess, "BaseSubprocessTransport"):
+                org_sub_del = base_subprocess.BaseSubprocessTransport.__del__
+                def patched_sub_del(self):
+                    try:
+                        org_sub_del(self)
+                    except (ValueError, OSError, RuntimeError):
+                        pass
+                base_subprocess.BaseSubprocessTransport.__del__ = patched_sub_del
+        except Exception:
+            pass
 
 
 class VersionFetchWorker(QThread):
-    """Asynchronously fetches official Minecraft release versions from the Mojang API."""
-
     versions_fetched = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
 
@@ -39,8 +80,6 @@ class VersionFetchWorker(QThread):
 
 
 class JavaDownloadWorker(QThread):
-    """Asynchronously downloads Mojang's official portable JVM runtime."""
-
     progress = pyqtSignal(str, int)
     finished = pyqtSignal()
     error = pyqtSignal(str)
@@ -79,18 +118,19 @@ class JavaDownloadWorker(QThread):
 
 
 class LaunchWorker(QThread):
-    """Handles runtime file verification, asset downloads, and execution of the client."""
-
     progress_updated = pyqtSignal(str, int)
     launch_success = pyqtSignal()
     game_exited = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    performance_mods_installed = pyqtSignal()
 
-    def __init__(self, username: str, version: str, minecraft_dir: str):
+    def __init__(self, username: str, version: str, minecraft_dir: str, ram_gb: int, performance_mode: bool):
         super().__init__()
         self.username = username
         self.version = version
         self.minecraft_dir = minecraft_dir
+        self.ram_gb = ram_gb
+        self.performance_mode = performance_mode
         self._max_val = 0
 
     def run(self) -> None:
@@ -134,25 +174,57 @@ class LaunchWorker(QThread):
 
             self.progress_updated.emit("Preparing launch...", 100)
             
-            # Resolve the data path with camelCase formatting (.Vanta)
             if sys.platform == "win32":
                 vanta_dir = os.path.join(os.environ.get("APPDATA", ""), ".Vanta")
             else:
                 vanta_dir = os.path.expanduser("~/.Vanta")
                 
-            os.makedirs(vanta_dir, exist_ok=True)
+            # Per-version instance isolation
+            instance_dir = os.path.join(vanta_dir, "instances", self.version)
+            os.makedirs(instance_dir, exist_ok=True)
+
+            target_version = self.version
+            if self.performance_mode:
+                try:
+                    self.progress_updated.emit("Installing Fabric...", 10)
+                    minecraft_launcher_lib.fabric.install_fabric(self.version, self.minecraft_dir)
+                    latest_loader = minecraft_launcher_lib.fabric.get_latest_loader_version()
+                    target_version = f"fabric-loader-{latest_loader}-{self.version}"
+                    self._download_performance_mods(instance_dir)
+                except Exception as e:
+                    sys.stderr.write(f"Mod environment installation failed: {e}\n")
 
             options = {
                 "username": self.username,
                 "uuid": str(uuid.uuid4()),
                 "token": "",
                 "launcherName": "Vanta",
-                "launcherVersion": "1.0",
-                "gameDirectory": vanta_dir
+                "launcherVersion": "1.1",
+                "gameDirectory": instance_dir,
+                "jvmArguments": [
+                    f"-Xmx{self.ram_gb}G",
+                    f"-Xms{self.ram_gb}G",
+                    "-XX:+UseG1GC",
+                    "-XX:+ParallelRefProcEnabled",
+                    "-XX:MaxGCPauseMillis=200",
+                    "-XX:+UnlockExperimentalVMOptions",
+                    "-XX:+DisableExplicitGC",
+                    "-XX:+AlwaysPreTouch",
+                    "-XX:G1NewSizePercent=30",
+                    "-XX:G1MaxNewSizePercent=40",
+                    "-XX:G1HeapRegionSize=8M",
+                    "-XX:G1ReservePercent=20",
+                    "-XX:G1HeapWastePercent=5",
+                    "-XX:G1MixedGCCountTarget=4",
+                    "-XX:InitiatingHeapOccupancyPercent=15",
+                    "-XX:G1MixedGCLiveThresholdPercent=90",
+                    "-XX:G1RSetUpdatingPauseTimePercent=5",
+                    "-XX:SurvivorRatio=32",
+                    "-XX:+PerfDisableSharedMem",
+                    "-XX:MaxTenuringThreshold=1"
+                ]
             }
 
-            # If system Java is absent and the version doesn't bundle its own runtime,
-            # we enforce the downloaded legacy portable runtime.
             if not shutil.which("java"):
                 try:
                     runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
@@ -167,7 +239,7 @@ class LaunchWorker(QThread):
                         options["executablePath"] = legacy_exec
 
             command = minecraft_launcher_lib.command.get_minecraft_command(
-                self.version,
+                target_version,
                 self.minecraft_dir,
                 options
             )
@@ -178,7 +250,7 @@ class LaunchWorker(QThread):
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                cwd=vanta_dir,
+                cwd=instance_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             self.launch_success.emit()
@@ -194,9 +266,145 @@ class LaunchWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
+    def _download_performance_mods(self, instance_dir: str) -> None:
+        mods_dir = os.path.join(instance_dir, "mods")
+        os.makedirs(mods_dir, exist_ok=True)
+        
+        mods = ["sodium", "lithium", "ferrite-core", "entityculling"]
+        
+        # Skip already-cached mods
+        try:
+            local_files = [f.lower().replace("-", "").replace("_", "") for f in os.listdir(mods_dir) if f.endswith(".jar")]
+        except Exception:
+            local_files = []
+
+        mod_signatures = {
+            "sodium": "sodium",
+            "lithium": "lithium",
+            "ferrite-core": "ferrite",
+            "entityculling": "entityculling"
+        }
+
+        headers = {"User-Agent": "VantaLauncher/1.1 (vanta.launcher)"}
+        
+        for i, mod in enumerate(mods):
+            sig = mod_signatures.get(mod, mod).replace("-", "").replace("_", "")
+            
+            # Deduplicate against local cache
+            if any(sig in f for f in local_files):
+                continue
+
+            try:
+                self.progress_updated.emit(f"Checking {mod}...", int(20 + (i / len(mods)) * 60))
+                url = f"https://api.modrinth.com/v2/project/{mod}/version?loaders=[\"fabric\"]&game_versions=[\"{self.version}\"]"
+                r = requests.get(url, headers=headers, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data:
+                        file_info = data[0]["files"][0]
+                        for f in data[0]["files"]:
+                            if f.get("primary"):
+                                file_info = f
+                                break
+                        
+                        dest_path = os.path.join(mods_dir, file_info["filename"])
+                        if not os.path.exists(dest_path):
+                            self.progress_updated.emit(f"Downloading {mod}...", int(20 + (i / len(mods)) * 60))
+                            dl_res = requests.get(file_info["url"], headers=headers, timeout=10)
+                            if dl_res.status_code == 200:
+                                with open(dest_path, "wb") as out:
+                                    out.write(dl_res.content)
+            except Exception as e:
+                sys.stderr.write(f"Error downloading {mod}: {e}\n")
+
+        # Notify UI to refresh installed-mods list
+        self.performance_mods_installed.emit()
+
+
+class AvatarLoaderWorker(QThread):
+    avatar_loaded = pyqtSignal(QPixmap)
+
+    def __init__(self, username: str):
+        super().__init__()
+        self.username = username
+
+    def run(self) -> None:
+        if not self.username:
+            return
+        try:
+            url = f"https://minotar.net/helm/{self.username}/32.png"
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                pixmap = QPixmap()
+                pixmap.loadFromData(r.content)
+                self.avatar_loaded.emit(pixmap)
+        except Exception:
+            pass
+
+
+class ModSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+
+    def __init__(self, query: str):
+        super().__init__()
+        self.query = query
+
+    def run(self) -> None:
+        try:
+            url = f"https://api.modrinth.com/v2/search?query={self.query}&facets=[[\"categories:fabric\"],[\"project_type:mod\"]]"
+            headers = {"User-Agent": "VantaLauncher/1.1 (vanta.launcher)"}
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                hits = r.json().get("hits", [])
+                self.results_ready.emit(hits)
+        except Exception:
+            self.results_ready.emit([])
+
+
+class ModInstallWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, project_id: str, mc_version: str, instance_dir: str):
+        super().__init__()
+        self.project_id = project_id
+        self.mc_version = mc_version
+        self.instance_dir = instance_dir
+
+    def run(self) -> None:
+        try:
+            self.progress.emit("Locating version...")
+            url = f"https://api.modrinth.com/v2/project/{self.project_id}/version?loaders=[\"fabric\"]&game_versions=[\"{self.mc_version}\"]"
+            headers = {"User-Agent": "VantaLauncher/1.1 (vanta.launcher)"}
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if not data:
+                    raise ValueError("No matching versions found.")
+                
+                file_info = data[0]["files"][0]
+                for f in data[0]["files"]:
+                    if f.get("primary"):
+                        file_info = f
+                        break
+                
+                self.progress.emit(f"Downloading {file_info['filename']}...")
+                dest = os.path.join(self.instance_dir, "mods", file_info["filename"])
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                
+                dl_res = requests.get(file_info["url"], headers=headers, timeout=10)
+                if dl_res.status_code == 200:
+                    with open(dest, "wb") as f:
+                        f.write(dl_res.content)
+                    self.finished.emit()
+                else:
+                    raise ValueError("Download failed.")
+        except Exception as e:
+            self.error.emit(str(e))
+
 
 def _generate_arrow_image() -> str:
-    """Generates the combobox dropdown vector resource if missing."""
     temp_dir = os.path.join(os.path.expanduser("~"), ".mclaunch")
     os.makedirs(temp_dir, exist_ok=True)
     arrow_path = os.path.join(temp_dir, "arrow.png").replace("\\", "/")
@@ -222,6 +430,51 @@ def _generate_arrow_image() -> str:
     return arrow_path
 
 
+def _generate_settings_image() -> str:
+    temp_dir = os.path.join(os.path.expanduser("~"), ".mclaunch")
+    os.makedirs(temp_dir, exist_ok=True)
+    settings_path = os.path.join(temp_dir, "settings.png").replace("\\", "/")
+
+    if os.path.exists(settings_path):
+        return settings_path
+
+    try:
+        image = QImage(16, 16, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(QColor("#A0A0A2")))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        cx, cy = 8.0, 8.0
+        r_out = 5.0
+        r_hole = 2.5
+        num_teeth = 8
+
+        # Render gear teeth
+        for i in range(num_teeth):
+            painter.save()
+            painter.translate(cx, cy)
+            painter.rotate(i * 360.0 / num_teeth)
+            painter.drawRect(-1, -7, 2, 3)
+            painter.restore()
+
+        # Render main body
+        painter.drawEllipse(QPoint(8, 8), 5, 5)
+
+        # Cut out center hole
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.drawEllipse(QPoint(8, 8), 2, 2)
+
+        painter.end()
+        image.save(settings_path)
+    except Exception as e:
+        sys.stderr.write(f"Settings icon generation failure: {e}\n")
+
+    return settings_path
+
+
 class MinecraftLauncher(QMainWindow):
     _FADE_DURATION = 250
     _EXPAND_DURATION = 350
@@ -232,11 +485,71 @@ class MinecraftLauncher(QMainWindow):
         self.settings = QSettings("Vanta", "Preferences")
         self._drag_position = QPoint()
         self._is_closing = False
+        self._drawer_expanded = False
+        self.rpc = None
+        self._rpc_lock = threading.Lock()
         
+        if sys.platform == "win32":
+            self.vanta_dir = os.path.join(os.environ.get("APPDATA", ""), ".Vanta")
+        else:
+            self.vanta_dir = os.path.expanduser("~/.Vanta")
+            
         self.setWindowOpacity(0.0)
         self._init_ui()
+        # Defer RPC handshake until after initial paint
+        QTimer.singleShot(1000, self._init_rpc)
         self._load_settings()
         self._fetch_versions()
+
+    def _init_rpc(self) -> None:
+        if Presence is None:
+            self.rpc = None
+            self._set_rpc_unavailable()
+            return
+            
+        if self.settings.value("rpc_enabled", "true") != "true":
+            self.rpc = None
+            return
+            
+        def connect_discord():
+            try:
+                with self._rpc_lock:
+                    if self.rpc:
+                        try:
+                            self.rpc.close()
+                        except Exception:
+                            pass
+                    self.rpc = Presence("1509979983874097404")
+                    self.rpc.connect()
+                    from time import time
+                    self.rpc.update(
+                        state="Free Non-Premium Launcher",
+                        details="Playing Minecraft",
+                        start=int(time())
+                    )
+            except Exception:
+                with self._rpc_lock:
+                    self.rpc = None
+
+        threading.Thread(target=connect_discord, daemon=True).start()
+
+    def _update_rpc(self, state: str, details: str) -> None:
+        def update_task():
+            with self._rpc_lock:
+                if self.rpc:
+                    try:
+                        from time import time
+                        self.rpc.update(state=state, details=details, start=int(time()))
+                    except Exception:
+                        pass
+        threading.Thread(target=update_task, daemon=True).start()
+
+    def _set_rpc_unavailable(self) -> None:
+        """Disable RPC checkbox and show hint when pypresence is not installed."""
+        self.rpc_checkbox.setChecked(False)
+        self.rpc_checkbox.setEnabled(False)
+        self.rpc_checkbox.setText("Discord Rich Presence (pypresence not installed)")
+        self.settings.setValue("rpc_enabled", "false")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -395,7 +708,19 @@ class MinecraftLauncher(QMainWindow):
         if not self._is_closing:
             self._is_closing = True
             event.ignore()
-            self._fade_out_with_shrink(self.close)
+            
+            def cleanup_and_close():
+                with self._rpc_lock:
+                    if self.rpc:
+                        try:
+                            self.rpc.clear()
+                            self.rpc.close()
+                        except Exception:
+                            pass
+                        self.rpc = None
+                self.close()
+            
+            self._fade_out_with_shrink(cleanup_and_close)
         else:
             event.accept()
 
@@ -426,7 +751,7 @@ class MinecraftLauncher(QMainWindow):
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(370, 290)
+        self.setFixedSize(690, 290)
 
         arrow_path = _generate_arrow_image()
         self.setStyleSheet(self._stylesheet(arrow_path))
@@ -434,23 +759,17 @@ class MinecraftLauncher(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
 
-        outer_v = QVBoxLayout(central)
-        outer_v.addStretch(1)
-
-        outer_h = QHBoxLayout()
-        outer_h.addStretch(1)
-
-        card = QFrame(objectName="cardFrame")
-        card.setFixedSize(320, 240)
+        self.card = QFrame(central, objectName="cardFrame")
+        self.card.setGeometry(25, 25, 320, 240)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
         shadow.setXOffset(0)
         shadow.setYOffset(6)
         shadow.setColor(QColor(0, 0, 0, 100))
-        card.setGraphicsEffect(shadow)
+        self.card.setGraphicsEffect(shadow)
 
-        card_layout = QVBoxLayout(card)
+        card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(24, 16, 24, 24)
         card_layout.setSpacing(14)
 
@@ -466,6 +785,14 @@ class MinecraftLauncher(QMainWindow):
         title.addWidget(brand)
         title.addStretch(1)
 
+        self._settings_btn = QPushButton(objectName="settingsBtn")
+        self._settings_btn.setFixedSize(16, 16)
+        settings_icon_path = _generate_settings_image()
+        if os.path.exists(settings_icon_path):
+            self._settings_btn.setIcon(QIcon(settings_icon_path))
+            self._settings_btn.setIconSize(self._settings_btn.size())
+        self._settings_btn.clicked.connect(self._toggle_drawer)
+
         self._min_btn = QPushButton(objectName="minBtn")
         self._min_btn.setFixedSize(12, 12)
         self._min_btn.clicked.connect(self._fade_out_and_minimize)
@@ -474,28 +801,281 @@ class MinecraftLauncher(QMainWindow):
         self._close_btn.setFixedSize(12, 12)
         self._close_btn.clicked.connect(self.close)
 
+        title.addWidget(self._settings_btn)
         title.addWidget(self._min_btn)
         title.addWidget(self._close_btn)
         card_layout.addLayout(title)
 
+        nick_layout = QHBoxLayout()
+        nick_layout.setContentsMargins(0, 0, 0, 0)
+        nick_layout.setSpacing(8)
+
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(32, 32)
+        self.avatar_label.setStyleSheet("border-radius: 4px; background: #2C2C2E;")
+        nick_layout.addWidget(self.avatar_label)
+
         self.nick_input = QLineEdit()
         self.nick_input.setPlaceholderText("Username")
+        nick_layout.addWidget(self.nick_input)
+        card_layout.addLayout(nick_layout)
 
         self.version_combo = QComboBox()
         self.version_combo.addItem("Loading versions...")
         self.version_combo.setEnabled(False)
+        self.version_combo.currentTextChanged.connect(self._refresh_installed_mods)
 
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self._launch_game)
 
-        card_layout.addWidget(self.nick_input)
         card_layout.addWidget(self.version_combo)
         card_layout.addWidget(self.play_button)
 
-        outer_h.addWidget(card)
-        outer_h.addStretch(1)
-        outer_v.addLayout(outer_h)
-        outer_v.addStretch(1)
+        self.drawer = QFrame(central, objectName="drawer")
+        self.drawer.setGeometry(25, 25, 320, 240)
+        self.drawer.stackUnder(self.card)
+
+        drawer_layout = QVBoxLayout(self.drawer)
+        drawer_layout.setContentsMargins(16, 16, 16, 16)
+        drawer_layout.setSpacing(10)
+
+        nav_layout = QHBoxLayout()
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        self.settings_tab_btn = QPushButton("Settings", objectName="tabBtn")
+        self.mods_tab_btn = QPushButton("Mods Manager", objectName="tabBtn")
+        self.settings_tab_btn.clicked.connect(lambda: self.drawer_stack.setCurrentIndex(0))
+        self.mods_tab_btn.clicked.connect(lambda: self.drawer_stack.setCurrentIndex(1))
+        nav_layout.addWidget(self.settings_tab_btn)
+        nav_layout.addWidget(self.mods_tab_btn)
+        drawer_layout.addLayout(nav_layout)
+
+        self.drawer_stack = QStackedWidget()
+        drawer_layout.addWidget(self.drawer_stack)
+
+        settings_widget = QWidget()
+        settings_layout = QVBoxLayout(settings_widget)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(10)
+
+        ram_header_layout = QHBoxLayout()
+        ram_lbl = QLabel("Allocated RAM:")
+        ram_lbl.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI', sans-serif; font-size: 12px;")
+        self.ram_val_lbl = QLabel("4 GB")
+        self.ram_val_lbl.setStyleSheet("color: #0A84FF; font-family: 'Segoe UI', sans-serif; font-size: 12px; font-weight: bold;")
+        ram_header_layout.addWidget(ram_lbl)
+        ram_header_layout.addStretch(1)
+        ram_header_layout.addWidget(self.ram_val_lbl)
+        settings_layout.addLayout(ram_header_layout)
+
+        self.ram_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ram_slider.setMinimum(2)
+        self.ram_slider.setMaximum(16)
+        self.ram_slider.setValue(4)
+        self.ram_slider.valueChanged.connect(self._on_ram_slider_changed)
+        settings_layout.addWidget(self.ram_slider)
+
+        self.perf_checkbox = QCheckBox("Performance Mode (Fabric + Optimization Mods)")
+        self.perf_checkbox.setChecked(True)
+        settings_layout.addWidget(self.perf_checkbox)
+
+        self.rpc_checkbox = QCheckBox("Discord Rich Presence")
+        self.rpc_checkbox.setChecked(True)
+        self.rpc_checkbox.stateChanged.connect(self._on_rpc_state_changed)
+        settings_layout.addWidget(self.rpc_checkbox)
+        settings_layout.addStretch(1)
+
+        self.drawer_stack.addWidget(settings_widget)
+
+        mods_widget = QWidget()
+        mods_layout = QVBoxLayout(mods_widget)
+        mods_layout.setContentsMargins(0, 0, 0, 0)
+        mods_layout.setSpacing(6)
+
+        search_layout = QHBoxLayout()
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.setSpacing(4)
+        
+        self.mod_search_input = QLineEdit()
+        self.mod_search_input.setPlaceholderText("Search Modrinth...")
+        self.mod_search_input.setFixedHeight(26)
+        self.mod_search_input.setStyleSheet("padding: 2px 8px; font-size: 11px;")
+        
+        # Debounce search input
+        self._search_timer = QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._on_mod_search)
+        self.mod_search_input.textChanged.connect(self._search_timer.start)
+        
+        search_layout.addWidget(self.mod_search_input)
+        mods_layout.addLayout(search_layout)
+
+        self.mods_list = QListWidget()
+        mods_layout.addWidget(self.mods_list)
+
+        mod_action_layout = QHBoxLayout()
+        self.mod_action_btn = QPushButton("Install", objectName="modActionBtn")
+        self.mod_action_btn.clicked.connect(self._on_mod_action)
+        self.mod_action_btn.setFixedHeight(24)
+        self.mod_delete_btn = QPushButton("Delete Selected", objectName="modDeleteBtn")
+        self.mod_delete_btn.clicked.connect(self._on_mod_delete)
+        self.mod_delete_btn.setFixedHeight(24)
+        mod_action_layout.addWidget(self.mod_action_btn)
+        mod_action_layout.addWidget(self.mod_delete_btn)
+        mods_layout.addLayout(mod_action_layout)
+
+        self.drawer_stack.addWidget(mods_widget)
+
+        self._avatar_timer = QTimer()
+        self._avatar_timer.setSingleShot(True)
+        self._avatar_timer.timeout.connect(self._fetch_avatar)
+        self.nick_input.textChanged.connect(self._on_nick_changed)
+
+    def _toggle_drawer(self) -> None:
+        self._stop_animations()
+        anim = QPropertyAnimation(self.drawer, b"geometry")
+        anim.setDuration(300)
+        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        if self._drawer_expanded:
+            anim.setStartValue(QRect(345, 25, 320, 240))
+            anim.setEndValue(QRect(25, 25, 320, 240))
+            self._drawer_expanded = False
+        else:
+            anim.setStartValue(QRect(25, 25, 320, 240))
+            anim.setEndValue(QRect(345, 25, 320, 240))
+            self._drawer_expanded = True
+
+        self._anim_group = QParallelAnimationGroup()
+        self._anim_group.addAnimation(anim)
+        self._anim_group.start()
+
+    def _on_ram_slider_changed(self, value: int) -> None:
+        self.ram_val_lbl.setText(f"{value} GB")
+        self.settings.setValue("ram_gb", value)
+
+    def _on_rpc_state_changed(self, state: int) -> None:
+        enabled = state == 2
+        self.settings.setValue("rpc_enabled", enabled)
+        if enabled:
+            self._init_rpc()
+        else:
+            def close_rpc():
+                with self._rpc_lock:
+                    if self.rpc:
+                        try:
+                            self.rpc.close()
+                        except Exception:
+                            pass
+                        self.rpc = None
+            threading.Thread(target=close_rpc, daemon=True).start()
+
+    def _on_nick_changed(self) -> None:
+        self._avatar_timer.start(500)
+
+    def _fetch_avatar(self) -> None:
+        username = self.nick_input.text().strip()
+        if not username:
+            self.avatar_label.clear()
+            return
+        self._avatar_loader = AvatarLoaderWorker(username)
+        self._avatar_loader.avatar_loaded.connect(self.avatar_label.setPixmap)
+        self._avatar_loader.start()
+
+    def _on_mod_search(self) -> None:
+        query = self.mod_search_input.text().strip()
+        if not query:
+            self._refresh_installed_mods()
+            return
+            
+        if hasattr(self, "_search_worker") and self._search_worker.isRunning():
+            try:
+                self._search_worker.results_ready.disconnect()
+            except Exception:
+                pass
+                
+        self._search_worker = ModSearchWorker(query)
+        self._search_worker.results_ready.connect(self._on_search_results)
+        self._search_worker.start()
+
+    def _on_search_results(self, hits: list) -> None:
+        self.mods_list.clear()
+        self.mod_action_btn.setText("Install")
+        self.mod_action_btn.setProperty("mode", "install")
+        for hit in hits:
+            item = QListWidgetItem(f"{hit['title']} ({hit['slug']})")
+            item.setData(Qt.ItemDataRole.UserRole, hit['project_id'])
+            self.mods_list.addItem(item)
+
+    def _refresh_installed_mods(self) -> None:
+        self.mods_list.clear()
+        self.mod_action_btn.setText("Refresh")
+        self.mod_action_btn.setProperty("mode", "refresh")
+        
+        version = self.version_combo.currentText()
+        if not version or version == "Loading versions...":
+            return
+            
+        mods_dir = os.path.join(self.vanta_dir, "instances", version, "mods")
+        if os.path.exists(mods_dir):
+            for file in os.listdir(mods_dir):
+                if file.endswith(".jar"):
+                    self.mods_list.addItem(QListWidgetItem(file))
+
+    def _on_mod_action(self) -> None:
+        mode = self.mod_action_btn.property("mode")
+        if mode == "refresh":
+            self._refresh_installed_mods()
+            return
+
+        selected_item = self.mods_list.currentItem()
+        if not selected_item:
+            return
+
+        project_id = selected_item.data(Qt.ItemDataRole.UserRole)
+        version = self.version_combo.currentText()
+        if not project_id or not version or version == "Loading versions...":
+            return
+
+        self.mod_action_btn.setEnabled(False)
+        self.mod_action_btn.setText("Preparing...")
+        
+        # Store mod in version-scoped instance
+        instance_dir = os.path.join(self.vanta_dir, "instances", version)
+        self._install_worker = ModInstallWorker(project_id, version, instance_dir)
+        self._install_worker.progress.connect(self.mod_action_btn.setText)
+        self._install_worker.finished.connect(self._on_mod_installed)
+        self._install_worker.error.connect(self._on_mod_install_failed)
+        self._install_worker.start()
+
+    def _on_mod_installed(self) -> None:
+        self.mod_action_btn.setEnabled(True)
+        self.mod_action_btn.setText("Install")
+        self.mod_search_input.clear()
+        self._refresh_installed_mods()
+
+    def _on_mod_install_failed(self, error: str) -> None:
+        self.mod_action_btn.setEnabled(True)
+        self.mod_action_btn.setText("Install")
+        QMessageBox.warning(self, "Mod Install Error", f"Failed to install mod:\n\n{error}")
+
+    def _on_mod_delete(self) -> None:
+        selected_item = self.mods_list.currentItem()
+        if not selected_item:
+            return
+            
+        filename = selected_item.text()
+        version = self.version_combo.currentText()
+        if not version or version == "Loading versions...":
+            return
+            
+        filepath = os.path.join(self.vanta_dir, "instances", version, "mods", filename)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                self._refresh_installed_mods()
+            except Exception as e:
+                QMessageBox.warning(self, "Delete Error", f"Could not delete mod file:\n\n{e}")
 
     @staticmethod
     def _stylesheet(arrow_path: str) -> str:
@@ -504,6 +1084,11 @@ class MinecraftLauncher(QMainWindow):
                 background: transparent;
             }}
             #cardFrame {{
+                background-color: #1C1C1E;
+                border: 1px solid #2C2C2E;
+                border-radius: 16px;
+            }}
+            #drawer {{
                 background-color: #1C1C1E;
                 border: 1px solid #2C2C2E;
                 border-radius: 16px;
@@ -626,14 +1211,105 @@ class MinecraftLauncher(QMainWindow):
             #minBtn:hover {{
                 background-color: #1AAB33;
             }}
+            #settingsBtn {{
+                background-color: transparent;
+                border: none;
+                padding: 0;
+            }}
+            #settingsBtn:hover {{
+                background-color: rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+            }}
+            #tabBtn {{
+                background-color: #2C2C2E;
+                border: 1px solid #3A3A3C;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: normal;
+                color: #FFFFFF;
+            }}
+            #tabBtn:hover {{
+                background-color: #3A3A3C;
+            }}
+            #drawer QLabel {{
+                color: #FFFFFF;
+                font-family: 'Segoe UI', sans-serif;
+            }}
+            QSlider::groove:horizontal {{
+                height: 4px;
+                background: #3A3A3C;
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #FFFFFF;
+                width: 14px;
+                margin-top: -5px;
+                margin-bottom: -5px;
+                border-radius: 7px;
+            }}
+            QCheckBox {{
+                color: #FFFFFF;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 2px solid #3A3A3C;
+                border-radius: 4px;
+                background: #2C2C2E;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: #0A84FF;
+                border-color: #0A84FF;
+            }}
+            QListWidget {{
+                background-color: #2C2C2E;
+                border: 1px solid #3A3A3C;
+                border-radius: 8px;
+                color: #FFFFFF;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11px;
+            }}
+            QListWidget::item {{
+                padding: 4px;
+                border-bottom: 1px solid #3A3A3C;
+            }}
+            QListWidget::item:selected {{
+                background-color: #0A84FF;
+                color: #FFFFFF;
+            }}
+            #modActionBtn, #modDeleteBtn {{
+                font-size: 11px;
+                padding: 2px 6px;
+                border-radius: 6px;
+            }}
+            #modDeleteBtn {{
+                background-color: #FF5F56;
+            }}
+            #modDeleteBtn:hover {{
+                background-color: #E0443E;
+            }}
         """
 
     def _load_settings(self) -> None:
         self.nick_input.setText(self.settings.value("username", ""))
+        self.ram_slider.setValue(int(self.settings.value("ram_gb", 4)))
+        self.perf_checkbox.setChecked(self.settings.value("performance_mode", "true") == "true")
+        
+        rpc_on = self.settings.value("rpc_enabled", "true") == "true"
+        # Suppress state-changed side-effect during startup; RPC is bootstrapped
+        # by the single-shot timer in __init__
+        self.rpc_checkbox.blockSignals(True)
+        self.rpc_checkbox.setChecked(rpc_on)
+        self.rpc_checkbox.blockSignals(False)
 
     def _save_settings(self) -> None:
         self.settings.setValue("username", self.nick_input.text().strip())
         self.settings.setValue("version", self.version_combo.currentText())
+        self.settings.setValue("performance_mode", "true" if self.perf_checkbox.isChecked() else "false")
+        self.settings.setValue("ram_gb", self.ram_slider.value())
 
     def _fetch_versions(self) -> None:
         self._fetch_worker = VersionFetchWorker()
@@ -675,6 +1351,7 @@ class MinecraftLauncher(QMainWindow):
         self.nick_input.setEnabled(enabled)
         self.version_combo.setEnabled(enabled)
         self.play_button.setEnabled(enabled)
+        self._settings_btn.setEnabled(enabled)
 
     def _launch_game(self) -> None:
         username = self.nick_input.text().strip()
@@ -743,11 +1420,17 @@ class MinecraftLauncher(QMainWindow):
 
     def _start_game_launch(self, username: str, version: str) -> None:
         self._set_ui_enabled(False)
-        self._launch_worker = LaunchWorker(username, version, self.minecraft_dir)
+        ram = self.ram_slider.value()
+        perf = self.perf_checkbox.isChecked()
+        
+        self._update_rpc(state="In-Game", details=f"Playing Minecraft {version}")
+
+        self._launch_worker = LaunchWorker(username, version, self.minecraft_dir, ram, perf)
         self._launch_worker.progress_updated.connect(self._on_launch_progress)
         self._launch_worker.launch_success.connect(self._on_launch_success)
         self._launch_worker.game_exited.connect(self._on_game_exited)
         self._launch_worker.error_occurred.connect(self._on_launch_error)
+        self._launch_worker.performance_mods_installed.connect(self._refresh_installed_mods)
         self._launch_worker.start()
 
     def _on_launch_progress(self, status: str, percent: int) -> None:
@@ -765,6 +1448,7 @@ class MinecraftLauncher(QMainWindow):
         self.show()
         self._set_ui_enabled(True)
         self.play_button.setText("Play")
+        self._update_rpc(state="Free Non-Premium Launcher", details="Playing Minecraft")
 
     def _on_launch_error(self, error_message: str) -> None:
         self._set_ui_enabled(True)
@@ -774,12 +1458,16 @@ class MinecraftLauncher(QMainWindow):
             "Launch Error",
             f"An error occurred while launching Minecraft:\n\n{error_message}",
         )
+        self._update_rpc(state="Free Non-Premium Launcher", details="Playing Minecraft")
 
 
 if __name__ == "__main__":
+    # Suppress asyncio teardown warnings on Windows
+    silence_asyncio_windows_bugs()
+
     if sys.platform == "win32":
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vanta.launcher.minecraft.1.0")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vanta.launcher.minecraft.1.1")
         except Exception as e:
             sys.stderr.write(f"Failed to configure taskbar AppUserModelID: {e}\n")
 
