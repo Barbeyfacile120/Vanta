@@ -35,9 +35,9 @@ A lightweight, non-premium Minecraft launcher built with Python 3 and PyQt6. Pic
 ## 📸 Screenshots
 
 ### Standard Layout
-| Empty Launcher | Profile Preview | Version Selection | Installing Assets |
+| Empty Launcher | Profile Preview | Installing Assets | Version Selection |
 | :---: | :---: | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/0ad77a66-347b-451e-9f32-16657f843038" width="200" alt="Vanta Launcher Empty UI" /> | <img src="https://github.com/user-attachments/assets/db31a3a6-0afd-4230-9f67-07e651dc4635" width="200" alt="Vanta Launcher User Profile" /> | <img src="https://github.com/user-attachments/assets/9534756e-2c67-494c-b62b-2eab55c606df" width="200" alt="Vanta Launcher Version List" /> | <img src="https://github.com/user-attachments/assets/2d18a794-abef-4ac2-9a13-68175adfd102" width="200" alt="Vanta Launcher Installing" /> |
+| <img src="https://github.com/user-attachments/assets/0ad77a66-347b-451e-9f32-16657f843038" width="200" alt="Vanta Launcher Empty UI" /> | <img src="https://github.com/user-attachments/assets/db31a3a6-0afd-4230-9f67-07e651dc4635" width="200" alt="Vanta Launcher User Profile" /> | <img src="https://github.com/user-attachments/assets/2d18a794-abef-4ac2-9a13-68175adfd102" width="200" alt="Vanta Launcher Installing" /> | <img src="https://github.com/user-attachments/assets/9534756e-2c67-494c-b62b-2eab55c606df" width="200" alt="Vanta Launcher Version List" /> |
 
 ### Extended Panels
 | Settings Drawer | Mods Manager |
