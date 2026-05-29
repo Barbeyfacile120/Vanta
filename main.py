@@ -104,11 +104,13 @@ class LaunchWorker(QThread):
             )
 
             self.progress_updated.emit("Launching...", 100)
+            
+            # Avoid displaying system console output by redirecting streams
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
             self.launch_success.emit()
             process.wait()
@@ -194,6 +196,8 @@ class MinecraftLauncher(QMainWindow):
 
     @staticmethod
     def _get_taskbar_geometry() -> Optional[QRect]:
+        if sys.platform != "win32":
+            return None
         try:
             hwnd = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
             if not hwnd:
@@ -343,11 +347,14 @@ class MinecraftLauncher(QMainWindow):
     def _init_ui(self) -> None:
         self.setWindowTitle("Vanta Launcher")
 
+        # Resolve window icon safely with standard fallbacks
         if getattr(sys, "frozen", False):
             icon_path = os.path.join(sys._MEIPASS, "icons", "icon.ico")
         else:
             icon_path = os.path.join(os.path.dirname(__file__), "icons", "icon.ico")
-        self.setWindowIcon(QIcon(icon_path))
+            
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -587,9 +594,15 @@ class MinecraftLauncher(QMainWindow):
             combined = list(dict.fromkeys(installed + fallback))
             self.version_combo.addItems(combined)
         except Exception:
-            self.version_combo.addItems(fallback)
+            combined = fallback
+            self.version_combo.addItems(combined)
 
         self.version_combo.setEnabled(True)
+        
+        # Load the last saved version on fallback if it exists in the offline list
+        saved_version = self.settings.value("version", "")
+        if saved_version in combined:
+            self.version_combo.setCurrentText(saved_version)
 
     def _set_ui_enabled(self, enabled: bool) -> None:
         self.nick_input.setEnabled(enabled)
@@ -600,8 +613,14 @@ class MinecraftLauncher(QMainWindow):
         username = self.nick_input.text().strip()
         version = self.version_combo.currentText()
 
+        # Guard clause: ensure a non-empty username
         if not username:
             QMessageBox.warning(self, "Invalid Username", "Please enter a username.")
+            return
+
+        # Guard clause: ensure launcher has loaded the version list successfully
+        if not version or version == "Loading versions..." or not self.version_combo.isEnabled():
+            QMessageBox.warning(self, "Launcher Busy", "Please wait for the version list to load.")
             return
 
         self._save_settings()
@@ -643,7 +662,7 @@ class MinecraftLauncher(QMainWindow):
 if __name__ == "__main__":
     if sys.platform == "win32":
         try:
-            # Set process AppUserModelID to resolve taskbar icon clustering behavior
+            # Set explicit AppUserModelID to ensure taskbar icon handles windows grouping properly
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vanta.launcher.minecraft.1.0")
         except Exception as e:
             sys.stderr.write(f"Failed to configure taskbar AppUserModelID: {e}\n")
