@@ -34,13 +34,15 @@ A lightweight, non-premium Minecraft launcher built with Python 3 and PyQt6. Pic
 
 ## 📸 Screenshots
 
-| Empty Launcher | Profile Preview | Version Selection |
-| :---: | :---: | :---: |
-| <img src="TU_WSTAW_LINK_DO_ZDJECIA_1" width="240" alt="Vanta Launcher Empty UI" /> | <img src="TU_WSTAW_LINK_DO_ZDJECIA_2" width="240" alt="Vanta Launcher User Profile" /> | <img src="TU_WSTAW_LINK_DO_ZDJECIA_3" width="240" alt="Vanta Launcher Version List" /> |
+### Standard Layout
+| Empty Launcher | Profile Preview | Version Selection | Installing Assets |
+| :---: | :---: | :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/0ad77a66-347b-451e-9f32-16657f843038" width="200" alt="Vanta Launcher Empty UI" /> | <img src="https://github.com/user-attachments/assets/db31a3a6-0afd-4230-9f67-07e651dc4635" width="200" alt="Vanta Launcher User Profile" /> | <img src="https://github.com/user-attachments/assets/9534756e-2c67-494c-b62b-2eab55c606df" width="200" alt="Vanta Launcher Version List" /> | <img src="https://github.com/user-attachments/assets/2d18a794-abef-4ac2-9a13-68175adfd102" width="200" alt="Vanta Launcher Installing" /> |
 
-| Installing Assets | Settings Drawer | Mods Manager |
-| :---: | :---: | :---: |
-| <img src="TU_WSTAW_LINK_DO_ZDJECIA_4" width="240" alt="Vanta Launcher Installing" /> | <img src="TU_WSTAW_LINK_DO_ZDJECIA_5" width="240" alt="Vanta Launcher Settings" /> | <img src="TU_WSTAW_LINK_DO_ZDJECIA_6" width="240" alt="Vanta Launcher Mods Manager" /> |
+### Extended Panels
+| Settings Drawer | Mods Manager |
+| :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/ec631c5c-4e94-403b-aa59-d24e87720470" width="380" alt="Vanta Launcher Settings" /> | <img src="https://github.com/user-attachments/assets/660366fe-8595-4b31-bc3f-7264d70ab0a7" width="380" alt="Vanta Launcher Mods Manager" /> |
 
 ---
 
