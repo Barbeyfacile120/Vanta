@@ -3,6 +3,7 @@ import os
 import uuid
 import subprocess
 import ctypes
+import shutil
 from ctypes import wintypes
 from typing import List, Optional
 
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QBrush, QPolygon, QIcon
 import minecraft_launcher_lib
+import minecraft_launcher_lib.runtime
 
 
 class VersionFetchWorker(QThread):
@@ -34,6 +36,46 @@ class VersionFetchWorker(QThread):
             self.versions_fetched.emit(releases)
         except Exception as e:
             self.error_occurred.emit(str(e))
+
+
+class JavaDownloadWorker(QThread):
+    """Asynchronously downloads Mojang's official portable JVM runtime."""
+
+    progress = pyqtSignal(str, int)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, jvm_version: str, minecraft_dir: str):
+        super().__init__()
+        self.jvm_version = jvm_version
+        self.minecraft_dir = minecraft_dir
+        self._max_val = 0
+
+    def run(self) -> None:
+        try:
+            def _set_status(text: str) -> None:
+                self.progress.emit(text, -1)
+
+            def _set_max(val: int) -> None:
+                self._max_val = val
+
+            def _set_progress(val: int) -> None:
+                if self._max_val > 0:
+                    percent = int((val / self._max_val) * 100)
+                    self.progress.emit("Downloading Java...", percent)
+
+            callbacks = {
+                "setStatus": _set_status,
+                "setProgress": _set_progress,
+                "setMax": _set_max,
+            }
+
+            minecraft_launcher_lib.runtime.install_jvm_runtime(
+                self.jvm_version, self.minecraft_dir, callback=callbacks
+            )
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class LaunchWorker(QThread):
@@ -91,21 +133,38 @@ class LaunchWorker(QThread):
                     ) from net_err
 
             self.progress_updated.emit("Preparing launch...", 100)
+            
+            options = {
+                "username": self.username,
+                "uuid": str(uuid.uuid4()),
+                "token": "",
+                "launcherName": "Vanta",
+                "launcherVersion": "1.0",
+            }
+
+            # If system Java is absent and the version doesn't bundle its own runtime,
+            # we enforce the downloaded legacy portable runtime.
+            if not shutil.which("java"):
+                try:
+                    runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
+                        self.version, self.minecraft_dir
+                    )
+                except Exception:
+                    runtime_info = None
+
+                if runtime_info is None:
+                    legacy_exec = minecraft_launcher_lib.runtime.get_executable_path("jre-legacy", self.minecraft_dir)
+                    if legacy_exec:
+                        options["executablePath"] = legacy_exec
+
             command = minecraft_launcher_lib.command.get_minecraft_command(
                 self.version,
                 self.minecraft_dir,
-                {
-                    "username": self.username,
-                    "uuid": str(uuid.uuid4()),
-                    "token": "",
-                    "launcherName": "Vanta",
-                    "launcherVersion": "1.0",
-                },
+                options
             )
 
             self.progress_updated.emit("Launching...", 100)
             
-            # Avoid displaying system console output by redirecting streams
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
@@ -347,7 +406,6 @@ class MinecraftLauncher(QMainWindow):
     def _init_ui(self) -> None:
         self.setWindowTitle("Vanta Launcher")
 
-        # Resolve window icon safely with standard fallbacks
         if getattr(sys, "frozen", False):
             icon_path = os.path.join(sys._MEIPASS, "icons", "icon.ico")
         else:
@@ -599,7 +657,6 @@ class MinecraftLauncher(QMainWindow):
 
         self.version_combo.setEnabled(True)
         
-        # Load the last saved version on fallback if it exists in the offline list
         saved_version = self.settings.value("version", "")
         if saved_version in combined:
             self.version_combo.setCurrentText(saved_version)
@@ -613,19 +670,71 @@ class MinecraftLauncher(QMainWindow):
         username = self.nick_input.text().strip()
         version = self.version_combo.currentText()
 
-        # Guard clause: ensure a non-empty username
         if not username:
             QMessageBox.warning(self, "Invalid Username", "Please enter a username.")
             return
 
-        # Guard clause: ensure launcher has loaded the version list successfully
         if not version or version == "Loading versions..." or not self.version_combo.isEnabled():
             QMessageBox.warning(self, "Launcher Busy", "Please wait for the version list to load.")
             return
 
         self._save_settings()
-        self._set_ui_enabled(False)
 
+        # Check Java availability before initializing launch routine
+        has_system_java = shutil.which("java") is not None
+
+        try:
+            runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
+                version, self.minecraft_dir
+            )
+        except Exception:
+            runtime_info = None
+
+        # Prompt download for legacy versions without native Mojang runtimes if global Java is missing
+        if not has_system_java and runtime_info is None:
+            legacy_exec = minecraft_launcher_lib.runtime.get_executable_path("jre-legacy", self.minecraft_dir)
+            if not legacy_exec:
+                reply = QMessageBox.question(
+                    self,
+                    "Java Runtime Missing",
+                    "A Java installation is required to run this older version of Minecraft, but none was detected on your system.\n\n"
+                    "Would you like the launcher to automatically download and configure a portable, user-space Java runtime (Java 8)?\n\n"
+                    "No administrator privileges are required.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._set_ui_enabled(False)
+                    self.play_button.setText("Downloading Java...")
+                    
+                    self._java_worker = JavaDownloadWorker("jre-legacy", self.minecraft_dir)
+                    self._java_worker.progress.connect(self._on_java_progress)
+                    self._java_worker.finished.connect(lambda: self._start_game_launch(username, version))
+                    self._java_worker.error.connect(self._on_java_error)
+                    self._java_worker.start()
+                    return
+                else:
+                    return
+
+        self._start_game_launch(username, version)
+
+    def _on_java_progress(self, status: str, percent: int) -> None:
+        if percent >= 0:
+            self.play_button.setText(f"Java: {percent}%")
+        else:
+            self.play_button.setText(status[:20])
+
+    def _on_java_error(self, error_message: str) -> None:
+        self._set_ui_enabled(True)
+        self.play_button.setText("Play")
+        QMessageBox.critical(
+            self,
+            "Java Install Error",
+            f"Failed to install portable Java runtime:\n\n{error_message}",
+        )
+
+    def _start_game_launch(self, username: str, version: str) -> None:
+        self._set_ui_enabled(False)
         self._launch_worker = LaunchWorker(username, version, self.minecraft_dir)
         self._launch_worker.progress_updated.connect(self._on_launch_progress)
         self._launch_worker.launch_success.connect(self._on_launch_success)
@@ -662,7 +771,6 @@ class MinecraftLauncher(QMainWindow):
 if __name__ == "__main__":
     if sys.platform == "win32":
         try:
-            # Set explicit AppUserModelID to ensure taskbar icon handles windows grouping properly
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vanta.launcher.minecraft.1.0")
         except Exception as e:
             sys.stderr.write(f"Failed to configure taskbar AppUserModelID: {e}\n")
