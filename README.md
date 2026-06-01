@@ -62,7 +62,7 @@ The launcher utilizes dedicated asynchronous workers to isolate heavy IO and net
 
 ### For Users (Executable)
 1. Head over to the **[Releases](https://github.com/salo-yek/Vanta/releases)** page.
-2. Download the latest `Vanta.Launcher.exe` (Windows) or download the source to run on Linux.
+2. Download the latest `Vanta.exe` (Windows) or download the source to run on Linux.
 3. Run the application and start playing!
 
 ### For Developers (Running from Source)
