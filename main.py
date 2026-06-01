@@ -32,7 +32,6 @@ import minecraft_launcher_lib
 import minecraft_launcher_lib.runtime
 import minecraft_launcher_lib.fabric
 
-# Compliant User-Agent for all external API requests (Modrinth, Minotar, etc.)
 API_HEADERS = {
     "User-Agent": "VantaLauncher/1.1 (+https://github.com/vantalauncher; support@vantalauncher.dev)"
 }
@@ -40,16 +39,14 @@ API_HEADERS = {
 
 def silence_asyncio_windows_bugs() -> None:
     """
-    Suppresses noisy traceback warnings on Windows during asyncio event loop teardown.
-    This patches a known Python standard library issue where GC attempts to clean up 
-    closed pipe transports and raises ignored ValueError/RuntimeError exceptions.
+    Monkeypatch to silence unhandled ValueError/RuntimeError tracebacks on Windows 
+    during asyncio loop teardown (specifically closed pipe transport cleanup).
     """
     if sys.platform == "win32":
         try:
             import asyncio
             from asyncio import proactor_events, base_subprocess
             
-            # Patch _ProactorBasePipeTransport.__del__
             if hasattr(proactor_events, "_ProactorBasePipeTransport"):
                 org_pipe_del = proactor_events._ProactorBasePipeTransport.__del__
                 def patched_pipe_del(self):
@@ -59,7 +56,6 @@ def silence_asyncio_windows_bugs() -> None:
                         pass
                 proactor_events._ProactorBasePipeTransport.__del__ = patched_pipe_del
 
-            # Patch BaseSubprocessTransport.__del__
             if hasattr(base_subprocess, "BaseSubprocessTransport"):
                 org_sub_del = base_subprocess.BaseSubprocessTransport.__del__
                 def patched_sub_del(self):
@@ -70,6 +66,24 @@ def silence_asyncio_windows_bugs() -> None:
                 base_subprocess.BaseSubprocessTransport.__del__ = patched_sub_del
         except Exception:
             pass
+
+
+def is_fabric_compatible(version: str) -> bool:
+    """Fabric loader officially supports Minecraft 1.14 and newer."""
+    try:
+        core = version.split("-")[0]
+        parts = core.split(".")
+        if len(parts) >= 2:
+            major = int(parts[0])
+            minor = int(parts[1])
+            if major > 1:
+                return True
+            if major == 1 and minor >= 14:
+                return True
+            return False
+        return True
+    except (ValueError, IndexError):
+        return True
 
 
 class VersionFetchWorker(QThread):
@@ -188,18 +202,30 @@ class LaunchWorker(QThread):
             else:
                 vanta_dir = os.path.expanduser("~/.Vanta")
                 
-            # Per-version instance isolation
+            # Isolate game directories to avoid config/world corruption between versions
             instance_dir = os.path.join(vanta_dir, "instances", self.version)
             os.makedirs(instance_dir, exist_ok=True)
 
+            # Force Fabric if any user-installed mods exist, ignoring fabric-api itself
+            mods_dir = os.path.join(instance_dir, "mods")
+            has_custom_mods = False
+            if os.path.exists(mods_dir):
+                try:
+                    jars = [f for f in os.listdir(mods_dir) if f.endswith(".jar") and "fabric-api" not in f.lower() and "fabric_api" not in f.lower()]
+                    has_custom_mods = len(jars) > 0
+                except Exception:
+                    pass
+
             target_version = self.version
-            if self.performance_mode:
+            use_fabric = (self.performance_mode or has_custom_mods) and is_fabric_compatible(self.version)
+
+            if use_fabric:
                 try:
                     self.progress_updated.emit("Installing Fabric...", 10)
                     minecraft_launcher_lib.fabric.install_fabric(self.version, self.minecraft_dir)
                     latest_loader = minecraft_launcher_lib.fabric.get_latest_loader_version()
                     target_version = f"fabric-loader-{latest_loader}-{self.version}"
-                    self._download_performance_mods(instance_dir)
+                    self._ensure_fabric_api_and_mods(instance_dir, self.performance_mode)
                 except Exception as e:
                     sys.stderr.write(f"Mod environment installation failed: {e}\n")
 
@@ -239,6 +265,7 @@ class LaunchWorker(QThread):
                     runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
                         self.version, self.minecraft_dir
                     )
+                    runtime_info = None
                 except Exception:
                     runtime_info = None
 
@@ -255,7 +282,7 @@ class LaunchWorker(QThread):
 
             self.progress_updated.emit("Launching...", 100)
             
-            # Crash logger: redirect stdout/stderr to latest.log in the instance directory
+            # Capture stdout/stderr directly to latest.log for troubleshooting
             log_path = os.path.join(instance_dir, "latest.log")
             log_file = open(log_path, "w", encoding="utf-8")
             try:
@@ -281,19 +308,26 @@ class LaunchWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
-    def _download_performance_mods(self, instance_dir: str) -> None:
+    def _ensure_fabric_api_and_mods(self, instance_dir: str, download_perf_mods: bool) -> None:
         mods_dir = os.path.join(instance_dir, "mods")
         os.makedirs(mods_dir, exist_ok=True)
         
-        mods = ["sodium", "lithium", "ferrite-core", "entityculling"]
+        mods_to_download = ["fabric-api"]
+        if download_perf_mods:
+            mods_to_download.extend(["sodium", "lithium", "ferrite-core", "entityculling"])
+            
+        mods = []
+        for m in mods_to_download:
+            if m not in mods:
+                mods.append(m)
         
-        # Skip already-cached mods
         try:
             local_files = [f.lower().replace("-", "").replace("_", "") for f in os.listdir(mods_dir) if f.endswith(".jar")]
         except Exception:
             local_files = []
 
         mod_signatures = {
+            "fabric-api": "fabricapi",
             "sodium": "sodium",
             "lithium": "lithium",
             "ferrite-core": "ferrite",
@@ -305,7 +339,6 @@ class LaunchWorker(QThread):
         for i, mod in enumerate(mods):
             sig = mod_signatures.get(mod, mod).replace("-", "").replace("_", "")
             
-            # Deduplicate against local cache
             if any(sig in f for f in local_files):
                 continue
 
@@ -332,7 +365,6 @@ class LaunchWorker(QThread):
             except Exception as e:
                 sys.stderr.write(f"Error downloading {mod}: {e}\n")
 
-        # Notify UI to refresh installed-mods list
         self.performance_mods_installed.emit()
 
 
@@ -410,11 +442,47 @@ class ModInstallWorker(QThread):
                 if dl_res.status_code == 200:
                     with open(dest, "wb") as f:
                         f.write(dl_res.content)
-                    self.finished.emit()
                 else:
                     raise ValueError("Download failed.")
+                
+                # Treat Fabric API as a hard dependency if any mod is installed
+                self._ensure_fabric_api()
+                self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
+
+    def _ensure_fabric_api(self) -> None:
+        mods_dir = os.path.join(self.instance_dir, "mods")
+        os.makedirs(mods_dir, exist_ok=True)
+        
+        try:
+            local_files = [f.lower().replace("-", "").replace("_", "") for f in os.listdir(mods_dir) if f.endswith(".jar")]
+        except Exception:
+            local_files = []
+
+        if any("fabricapi" in f for f in local_files):
+            return
+
+        self.progress.emit("Downloading Fabric API dependency...")
+        try:
+            url = f"https://api.modrinth.com/v2/project/fabric-api/version?loaders=[\"fabric\"]&game_versions=[\"{self.mc_version}\"]"
+            r = requests.get(url, headers=API_HEADERS, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data:
+                    file_info = data[0]["files"][0]
+                    for f in data[0]["files"]:
+                        if f.get("primary"):
+                            file_info = f
+                            break
+                    
+                    dest_path = os.path.join(mods_dir, file_info["filename"])
+                    dl_res = requests.get(file_info["url"], headers=API_HEADERS, timeout=10)
+                    if dl_res.status_code == 200:
+                        with open(dest_path, "wb") as out:
+                            out.write(dl_res.content)
+        except Exception as e:
+            sys.stderr.write(f"Failed to auto-download Fabric API: {e}\n")
 
 
 def _generate_arrow_image() -> str:
@@ -457,28 +525,13 @@ def _generate_settings_image() -> str:
 
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QBrush(QColor("#A0A0A2")))
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor("#A0A0A2")))
 
-        cx, cy = 8.0, 8.0
-        r_out = 5.0
-        r_hole = 2.5
-        num_teeth = 8
-
-        # Render gear teeth
-        for i in range(num_teeth):
-            painter.save()
-            painter.translate(cx, cy)
-            painter.rotate(i * 360.0 / num_teeth)
-            painter.drawRect(-1, -7, 2, 3)
-            painter.restore()
-
-        # Render main body
-        painter.drawEllipse(QPoint(8, 8), 5, 5)
-
-        # Cut out center hole
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        painter.drawEllipse(QPoint(8, 8), 2, 2)
+        # Draw programmatic clean hamburger menu icon (3 bars) to avoid system font emoji issues
+        painter.drawRoundedRect(QRect(1, 3, 14, 2), 1, 1)
+        painter.drawRoundedRect(QRect(1, 7, 14, 2), 1, 1)
+        painter.drawRoundedRect(QRect(1, 11, 14, 2), 1, 1)
 
         painter.end()
         image.save(settings_path)
@@ -560,7 +613,6 @@ class MinecraftLauncher(QMainWindow):
         threading.Thread(target=update_task, daemon=True).start()
 
     def _set_rpc_unavailable(self) -> None:
-        """Disable RPC checkbox and show hint when pypresence is not installed."""
         self.rpc_checkbox.setChecked(False)
         self.rpc_checkbox.setEnabled(False)
         self.rpc_checkbox.setText("Discord Rich Presence (pypresence not installed)")
@@ -770,7 +822,6 @@ class MinecraftLauncher(QMainWindow):
             pass
 
     def _shutdown_workers(self) -> None:
-        # If Minecraft is running, terminate the subprocess to unblock the LaunchWorker
         if hasattr(self, "_launch_worker") and self._launch_worker is not None:
             try:
                 proc = getattr(self._launch_worker, "process", None)
@@ -783,11 +834,9 @@ class MinecraftLauncher(QMainWindow):
                         proc.wait(timeout=1)
             except Exception:
                 pass
-            # Wait for the LaunchWorker thread to finish
             if self._launch_worker.isRunning():
                 self._launch_worker.wait(3000)
 
-        # Wait for any remaining background workers to finish gracefully
         for worker in list(self._workers):
             if worker is not getattr(self, "_launch_worker", None) and worker.isRunning():
                 worker.wait(2000)
@@ -835,34 +884,15 @@ class MinecraftLauncher(QMainWindow):
                     return int(bytes_total / (1024 ** 3))
             except Exception:
                 pass
-        return 4  # Conservative fallback
-
-    @staticmethod
-    def _is_fabric_compatible(version: str) -> bool:
-        """Fabric loader officially supports Minecraft 1.14 and newer."""
-        try:
-            core = version.split("-")[0]
-            parts = core.split(".")
-            if len(parts) >= 2:
-                major = int(parts[0])
-                minor = int(parts[1])
-                if major > 1:
-                    return True
-                if major == 1 and minor >= 14:
-                    return True
-                return False
-            # For non-standard version strings (snapshots, etc.), assume compatible
-            return True
-        except (ValueError, IndexError):
-            return True
+        return 4 
 
     def _show_progress(self, visible: bool, text: str = "") -> None:
-        self.progress_bar.setVisible(visible)
         if visible:
+            self.play_stack.setCurrentIndex(1)
             self.progress_bar.setValue(0)
-            self.play_button.setEnabled(False)
-            self.play_button.setText(text or "Processing...")
+            self.progress_bar.setFormat(f"{text} %p%")
         else:
+            self.play_stack.setCurrentIndex(0)
             self.play_button.setEnabled(True)
             self.play_button.setText("Play")
 
@@ -883,7 +913,9 @@ class MinecraftLauncher(QMainWindow):
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(690, 290)
+        
+        # Kept extremely tight and slick - matching user preferences
+        self.setFixedSize(690, 270)
 
         arrow_path = _generate_arrow_image()
         self.setStyleSheet(self._stylesheet(arrow_path))
@@ -891,8 +923,9 @@ class MinecraftLauncher(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
 
+        # Set the height to 220px to prevent empty dead vertical space
         self.card = QFrame(central, objectName="cardFrame")
-        self.card.setGeometry(25, 25, 320, 240)
+        self.card.setGeometry(25, 25, 320, 220)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(24)
@@ -902,8 +935,8 @@ class MinecraftLauncher(QMainWindow):
         self.card.setGraphicsEffect(shadow)
 
         card_layout = QVBoxLayout(self.card)
-        card_layout.setContentsMargins(24, 16, 24, 24)
-        card_layout.setSpacing(14)
+        card_layout.setContentsMargins(20, 16, 20, 16)
+        card_layout.setSpacing(10)
 
         title = QHBoxLayout()
         title.setContentsMargins(0, 0, 0, 0)
@@ -956,26 +989,27 @@ class MinecraftLauncher(QMainWindow):
         self.version_combo.addItem("Loading versions...")
         self.version_combo.setEnabled(False)
         self.version_combo.currentTextChanged.connect(self._on_version_changed)
+        card_layout.addWidget(self.version_combo)
+
+        # Dynamic stacked container preventing layout shift during download/launch
+        self.play_stack = QStackedWidget()
+        self.play_stack.setFixedHeight(36)
 
         self.play_button = QPushButton("Play")
+        self.play_button.setFixedHeight(36)
         self.play_button.clicked.connect(self._launch_game)
 
-        card_layout.addWidget(self.version_combo)
-        card_layout.addWidget(self.play_button)
-
-        # Modern progress bar (hidden by default)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
+        self.progress_bar.setFixedHeight(36)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedHeight(16)
-        self.progress_bar.setStyleSheet(
-            "QProgressBar { background-color: #2C2C2E; border: 1px solid #3A3A3C; border-radius: 6px; color: #FFFFFF; font-family: 'Segoe UI', sans-serif; font-size: 12px; text-align: center; }"
-            "QProgressBar::chunk { background-color: #0A84FF; border-radius: 6px; }"
-        )
-        card_layout.addWidget(self.progress_bar)
+        self.progress_bar.setFormat("%p%")
+
+        self.play_stack.addWidget(self.play_button)
+        self.play_stack.addWidget(self.progress_bar)
+        card_layout.addWidget(self.play_stack)
 
         self.drawer = QFrame(central, objectName="drawer")
-        self.drawer.setGeometry(25, 25, 320, 240)
+        self.drawer.setGeometry(25, 25, 320, 220)
         self.drawer.stackUnder(self.card)
 
         drawer_layout = QVBoxLayout(self.drawer)
@@ -1043,7 +1077,6 @@ class MinecraftLauncher(QMainWindow):
         self.mod_search_input.setFixedHeight(26)
         self.mod_search_input.setStyleSheet("padding: 2px 8px; font-size: 11px;")
         
-        # Debounce search input
         self._search_timer = QTimer()
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
@@ -1076,7 +1109,6 @@ class MinecraftLauncher(QMainWindow):
 
     def _init_ram_slider(self) -> None:
         total_ram = self._get_total_ram_gb()
-        # Reserve 1 GB for the OS; ensure max is at least the minimum (2)
         max_ram = max(2, total_ram - 1)
         self.ram_slider.setMaximum(max_ram)
 
@@ -1087,12 +1119,12 @@ class MinecraftLauncher(QMainWindow):
         anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
         if self._drawer_expanded:
-            anim.setStartValue(QRect(345, 25, 320, 240))
-            anim.setEndValue(QRect(25, 25, 320, 240))
+            anim.setStartValue(QRect(345, 25, 320, 220))
+            anim.setEndValue(QRect(25, 25, 320, 220))
             self._drawer_expanded = False
         else:
-            anim.setStartValue(QRect(25, 25, 320, 240))
-            anim.setEndValue(QRect(345, 25, 320, 240))
+            anim.setStartValue(QRect(25, 25, 320, 220))
+            anim.setEndValue(QRect(345, 25, 320, 220))
             self._drawer_expanded = True
 
         self._anim_group = QParallelAnimationGroup()
@@ -1133,7 +1165,7 @@ class MinecraftLauncher(QMainWindow):
         self._avatar_loader.start()
 
     def _on_version_changed(self, version: str) -> None:
-        compatible = self._is_fabric_compatible(version)
+        compatible = is_fabric_compatible(version)
         self.perf_checkbox.setEnabled(compatible)
         if not compatible:
             self.perf_checkbox.setChecked(False)
@@ -1201,7 +1233,6 @@ class MinecraftLauncher(QMainWindow):
         self.mod_action_btn.setEnabled(False)
         self.mod_action_btn.setText("Preparing...")
         
-        # Store mod in version-scoped instance
         instance_dir = os.path.join(self.vanta_dir, "instances", version)
         self._install_worker = ModInstallWorker(project_id, version, instance_dir)
         self._register_worker(self._install_worker)
@@ -1259,9 +1290,10 @@ class MinecraftLauncher(QMainWindow):
                 background-color: #2C2C2E;
                 border: 2px solid #3A3A3C;
                 border-radius: 8px;
-                padding: 11px 15px;
+                padding: 0px 12px;
+                height: 32px;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
-                font-size: 14px;
+                font-size: 13px;
                 color: #FFFFFF;
             }}
             QLineEdit:focus {{
@@ -1275,9 +1307,10 @@ class MinecraftLauncher(QMainWindow):
                 background-color: #2C2C2E;
                 border: 2px solid #3A3A3C;
                 border-radius: 8px;
-                padding: 11px 15px;
+                padding: 0px 12px;
+                height: 32px;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
-                font-size: 14px;
+                font-size: 13px;
                 color: #FFFFFF;
             }}
             QComboBox:focus {{
@@ -1304,7 +1337,7 @@ class MinecraftLauncher(QMainWindow):
                 padding: 4px;
             }}
             QComboBox QAbstractItemView::item {{
-                padding: 10px 14px;
+                padding: 6px 12px;
                 border-radius: 6px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
@@ -1342,9 +1375,10 @@ class MinecraftLauncher(QMainWindow):
                 color: #FFFFFF;
                 border: none;
                 border-radius: 8px;
-                padding: 14px 20px;
+                padding: 0px 16px;
+                height: 36px;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
@@ -1360,7 +1394,7 @@ class MinecraftLauncher(QMainWindow):
             QProgressBar {{
                 background-color: #2C2C2E;
                 border: 1px solid #3A3A3C;
-                border-radius: 6px;
+                border-radius: 8px;
                 color: #FFFFFF;
                 font-family: 'Segoe UI', -apple-system, sans-serif;
                 font-size: 12px;
@@ -1368,7 +1402,7 @@ class MinecraftLauncher(QMainWindow):
             }}
             QProgressBar::chunk {{
                 background-color: #0A84FF;
-                border-radius: 6px;
+                border-radius: 7px;
             }}
             #closeBtn {{
                 background-color: #FF5F56;
@@ -1399,7 +1433,8 @@ class MinecraftLauncher(QMainWindow):
                 background-color: #2C2C2E;
                 border: 1px solid #3A3A3C;
                 border-radius: 6px;
-                padding: 6px 12px;
+                padding: 0px 12px;
+                height: 26px;
                 font-size: 11px;
                 font-weight: normal;
                 color: #FFFFFF;
@@ -1457,7 +1492,8 @@ class MinecraftLauncher(QMainWindow):
             }}
             #modActionBtn, #modDeleteBtn {{
                 font-size: 11px;
-                padding: 2px 6px;
+                padding: 0px 8px;
+                height: 22px;
                 border-radius: 6px;
             }}
             #modDeleteBtn {{
@@ -1471,13 +1507,10 @@ class MinecraftLauncher(QMainWindow):
     def _load_settings(self) -> None:
         self.nick_input.setText(self.settings.value("username", ""))
         saved_ram = int(self.settings.value("ram_gb", 4))
-        # Clamp saved RAM to current hardware limits
         self.ram_slider.setValue(min(saved_ram, self.ram_slider.maximum()))
         self.perf_checkbox.setChecked(self.settings.value("performance_mode", "true") == "true")
         
         rpc_on = self.settings.value("rpc_enabled", "true") == "true"
-        # Suppress state-changed side-effect during startup; RPC is bootstrapped
-        # by the single-shot timer in __init__
         self.rpc_checkbox.blockSignals(True)
         self.rpc_checkbox.setChecked(rpc_on)
         self.rpc_checkbox.blockSignals(False)
@@ -1529,7 +1562,6 @@ class MinecraftLauncher(QMainWindow):
         self.nick_input.setEnabled(enabled)
         self.version_combo.setEnabled(enabled)
         self.play_button.setEnabled(enabled)
-        self._settings_btn.setEnabled(enabled)
 
     def _launch_game(self) -> None:
         username = self.nick_input.text().strip()
@@ -1545,7 +1577,6 @@ class MinecraftLauncher(QMainWindow):
 
         self._save_settings()
 
-        # Determine the exact Java runtime required by this Minecraft version
         required_runtime = None
         try:
             runtime_info = minecraft_launcher_lib.runtime.get_version_runtime_information(
@@ -1555,7 +1586,6 @@ class MinecraftLauncher(QMainWindow):
         except Exception:
             pass
 
-        # If we know the required runtime, ensure it's installed
         if required_runtime:
             java_exec = minecraft_launcher_lib.runtime.get_executable_path(required_runtime, self.minecraft_dir)
             if not java_exec:
@@ -1570,7 +1600,7 @@ class MinecraftLauncher(QMainWindow):
                 )
                 if reply == QMessageBox.StandardButton.Yes:
                     self._set_ui_enabled(False)
-                    self._show_progress(True, "Downloading Java...")
+                    self._show_progress(True, "Downloading Java")
                     self._java_worker = JavaDownloadWorker(required_runtime, self.minecraft_dir)
                     self._register_worker(self._java_worker)
                     self._java_worker.progress.connect(self._on_java_progress)
@@ -1579,7 +1609,6 @@ class MinecraftLauncher(QMainWindow):
                     self._java_worker.start()
                 return
         else:
-            # Fallback for versions without a manifest entry (very old or custom)
             if not shutil.which("java"):
                 legacy_exec = minecraft_launcher_lib.runtime.get_executable_path("jre-legacy", self.minecraft_dir)
                 if not legacy_exec:
@@ -1594,7 +1623,7 @@ class MinecraftLauncher(QMainWindow):
                     )
                     if reply == QMessageBox.StandardButton.Yes:
                         self._set_ui_enabled(False)
-                        self._show_progress(True, "Downloading Java...")
+                        self._show_progress(True, "Downloading Java")
                         self._java_worker = JavaDownloadWorker("jre-legacy", self.minecraft_dir)
                         self._register_worker(self._java_worker)
                         self._java_worker.progress.connect(self._on_java_progress)
@@ -1608,9 +1637,10 @@ class MinecraftLauncher(QMainWindow):
     def _on_java_progress(self, status: str, percent: int) -> None:
         if percent >= 0:
             self.progress_bar.setValue(percent)
+            self.progress_bar.setFormat(f"Downloading Java: {percent}%")
         else:
             self.progress_bar.setValue(0)
-        self.play_button.setText("Downloading Java...")
+            self.progress_bar.setFormat("Downloading Java...")
 
     def _on_java_error(self, error_message: str) -> None:
         self._set_ui_enabled(True)
@@ -1623,10 +1653,9 @@ class MinecraftLauncher(QMainWindow):
 
     def _start_game_launch(self, username: str, version: str) -> None:
         self._set_ui_enabled(False)
-        self._show_progress(True, "Preparing...")
+        self._show_progress(True, "Preparing")
         ram = self.ram_slider.value()
-        # Guard performance mode against incompatible versions
-        perf = self.perf_checkbox.isChecked() and self._is_fabric_compatible(version)
+        perf = self.perf_checkbox.isChecked() and is_fabric_compatible(version)
         
         self._update_rpc(state="In-Game", details=f"Playing Minecraft {version}")
 
@@ -1642,10 +1671,10 @@ class MinecraftLauncher(QMainWindow):
     def _on_launch_progress(self, status: str, percent: int) -> None:
         if percent >= 0:
             self.progress_bar.setValue(percent)
-            self.play_button.setText("Installing...")
+            self.progress_bar.setFormat(f"Installing: {percent}%")
         else:
             label = status[:20] + "..." if len(status) > 20 else status
-            self.play_button.setText(label)
+            self.progress_bar.setFormat(f"{label}...")
 
     def _on_launch_success(self) -> None:
         self._fade_out_with_shrink(self.hide)
@@ -1671,7 +1700,6 @@ class MinecraftLauncher(QMainWindow):
 
 
 if __name__ == "__main__":
-    # Suppress asyncio teardown warnings on Windows
     silence_asyncio_windows_bugs()
 
     if sys.platform == "win32":
